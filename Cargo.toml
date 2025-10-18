@@ -7,7 +7,7 @@ description = "A no_std crate for interfacing with the SC16IS752 I2C/SPI port ex
 repository = "https://github.com/rand12345/sc16is752"
 license = "MIT"
 readme = "README.md"
-keywords = ["embedded", "hardware", "driver", "i2c", "spi", "expander", "uart", "gpio"]
+keywords = ["embedded", "i2c", "spi", "expander", "gpio"]
 categories = ["embedded", "no-std"]
 homepage = "https://rand12345.github.io"
 
