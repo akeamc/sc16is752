@@ -3,7 +3,7 @@ name = "sc16is752"
 version = "0.2.0"
 edition = "2021"
 authors = ["Rand <dint04wooded@icloud.com>"]
-description = "A no_std crate for interfacing with the SC16IS752 I2C/SPI port expander. This lib provides access to both UARTs and 8x GPIO lines"
+description = "A no_std async crate for interfacing with the SC16IS752 I2C/SPI port expander. This lib provides access to both UARTs and 8x GPIO lines"
 repository = "https://github.com/rand12345/sc16is752"
 license = "MIT"
 readme = "README.md"
@@ -12,7 +12,5 @@ categories = ["embedded", "no-std"]
 homepage = "https://rand12345.github.io"
 
 [dependencies]
-embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-embedded-io = "0.7"
 embedded-io-async = "0.7"
