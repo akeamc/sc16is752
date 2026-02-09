@@ -45,6 +45,10 @@
 
 use embedded_hal::i2c::I2c;
 use embedded_hal::spi::SpiDevice;
+use embedded_hal_async::i2c::I2c as AsyncI2c;
+use embedded_hal_async::spi::SpiDevice as AsyncSpiDevice;
+use embedded_io::{ErrorKind, ErrorType, Read, Write};
+use embedded_io_async::{Read as AsyncRead, Write as AsyncWrite};
 
 /// UARTs Channel A (TXA/RXA) and Channel B (TXB/RXB)
 #[derive(Debug, Copy, Clone)]
@@ -216,8 +220,36 @@ impl Default for UartConfig {
     }
 }
 
+/// Error type that implements embedded_io::Error
+#[derive(Debug)]
+pub enum SC16IS752Error<E> {
+    Bus(E),
+}
+
+impl<E> core::fmt::Display for SC16IS752Error<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SC16IS752Error::Bus(_) => write!(f, "Bus error"),
+        }
+    }
+}
+
+impl<E: core::fmt::Debug> core::error::Error for SC16IS752Error<E> {}
+
+impl<E: core::fmt::Debug> embedded_io::Error for SC16IS752Error<E> {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
+    }
+}
+
+impl<E> From<E> for SC16IS752Error<E> {
+    fn from(err: E) -> Self {
+        SC16IS752Error::Bus(err)
+    }
+}
+
 pub trait Bus {
-    type Error;
+    type Error: embedded_io::Error;
 
     fn write_register(
         &mut self,
@@ -227,6 +259,20 @@ pub trait Bus {
     ) -> Result<(), Self::Error>;
 
     fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait AsyncBus {
+    type Error: embedded_io::Error;
+
+    async fn write_register(
+        &mut self,
+        channel: Channel,
+        reg: Registers,
+        payload: u8,
+    ) -> Result<(), Self::Error>;
+
+    async fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error>;
 }
 
 #[derive(Debug)]
@@ -252,7 +298,7 @@ impl<I2C> Bus for SC16IS752i2c<I2C>
 where
     I2C: I2c,
 {
-    type Error = I2C::Error;
+    type Error = SC16IS752Error<I2C::Error>;
     fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error> {
         let mut result = [0];
         self.i2c
@@ -261,6 +307,7 @@ where
                 &[(reg as u8) << 3 | (channel as u8) << 1],
                 &mut result,
             )
+            .map_err(SC16IS752Error::Bus)
             .and(Ok(result[0]))
     }
 
@@ -270,10 +317,12 @@ where
         reg: Registers,
         payload: u8,
     ) -> Result<(), Self::Error> {
-        self.i2c.write(
-            self.address,
-            &[(reg as u8) << 3 | (channel as u8) << 1u8, payload],
-        )
+        self.i2c
+            .write(
+                self.address,
+                &[(reg as u8) << 3 | (channel as u8) << 1u8, payload],
+            )
+            .map_err(SC16IS752Error::Bus)
     }
 }
 
@@ -295,7 +344,7 @@ impl<SPI> Bus for SC16IS752spi<SPI>
 where
     SPI: SpiDevice,
 {
-    type Error = SPI::Error;
+    type Error = SC16IS752Error<SPI::Error>;
     fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error> {
         let mut result = [0u8; 2];
         self.spi
@@ -303,6 +352,7 @@ where
                 &mut result,
                 &[1 << 7 | (reg as u8) << 3 | (channel as u8) << 1, 0xaa],
             )
+            .map_err(SC16IS752Error::Bus)
             .and(Ok(result[1]))
     }
 
@@ -314,6 +364,7 @@ where
     ) -> Result<(), Self::Error> {
         self.spi
             .write(&[(reg as u8) << 3 | (channel as u8) << 1u8, payload])
+            .map_err(SC16IS752Error::Bus)
     }
 }
 
@@ -329,6 +380,352 @@ where
     peek_buf: [Option<u8>; 2],
 }
 
+/// Channel wrapper that implements embedded-io traits
+pub struct ChannelWrapper<'a, BUS>
+where
+    BUS: Bus,
+{
+    device: &'a mut SC16IS752<BUS>,
+    channel: Channel,
+}
+
+impl<'a, BUS> ChannelWrapper<'a, BUS>
+where
+    BUS: Bus,
+{
+    pub fn new(device: &'a mut SC16IS752<BUS>, channel: Channel) -> Self {
+        Self { device, channel }
+    }
+}
+
+impl<'a, BUS> ErrorType for ChannelWrapper<'a, BUS>
+where
+    BUS: Bus,
+{
+    type Error = BUS::Error;
+}
+
+impl<'a, BUS> Write for ChannelWrapper<'a, BUS>
+where
+    BUS: Bus,
+{
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.device.write(self.channel, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.device.flush(self.channel)
+    }
+}
+
+impl<'a, BUS> Read for ChannelWrapper<'a, BUS>
+where
+    BUS: Bus,
+{
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.device.read(self.channel, buf)
+    }
+}
+
+/// Async channel wrapper that implements embedded-io-async traits
+pub struct AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    device: &'a mut SC16IS752Async<BUS>,
+    channel: Channel,
+}
+
+impl<'a, BUS> AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    pub fn new(device: &'a mut SC16IS752Async<BUS>, channel: Channel) -> Self {
+        Self { device, channel }
+    }
+}
+
+impl<'a, BUS> embedded_io_async::ErrorType for AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    type Error = BUS::Error;
+}
+
+impl<'a, BUS> AsyncWrite for AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.device.write(self.channel, buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.device.flush(self.channel).await
+    }
+}
+
+impl<'a, BUS> AsyncRead for AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.device.read(self.channel, buf).await
+    }
+}
+
+pub struct SC16IS752i2cAsync<I2C>
+where
+    I2C: AsyncI2c,
+{
+    address: u8,
+    i2c: I2C,
+}
+
+impl<I2C> SC16IS752i2cAsync<I2C>
+where
+    I2C: AsyncI2c,
+{
+    pub fn new(address: u8, i2c: I2C) -> Self {
+        Self { address, i2c }
+    }
+}
+
+impl<I2C> AsyncBus for SC16IS752i2cAsync<I2C>
+where
+    I2C: AsyncI2c,
+{
+    type Error = SC16IS752Error<I2C::Error>;
+
+    async fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error> {
+        let mut result = [0];
+        self.i2c
+            .write_read(
+                self.address,
+                &[(reg as u8) << 3 | (channel as u8) << 1],
+                &mut result,
+            )
+            .await
+            .map_err(SC16IS752Error::Bus)
+            .and(Ok(result[0]))
+    }
+
+    async fn write_register(
+        &mut self,
+        channel: Channel,
+        reg: Registers,
+        payload: u8,
+    ) -> Result<(), Self::Error> {
+        self.i2c
+            .write(
+                self.address,
+                &[(reg as u8) << 3 | (channel as u8) << 1u8, payload],
+            )
+            .await
+            .map_err(SC16IS752Error::Bus)
+    }
+}
+
+pub struct SC16IS752spiAsync<SPI>
+where
+    SPI: AsyncSpiDevice,
+{
+    spi: SPI,
+}
+
+impl<SPI> SC16IS752spiAsync<SPI>
+where
+    SPI: AsyncSpiDevice,
+{
+    pub fn new(spi: SPI) -> Self {
+        Self { spi }
+    }
+}
+
+impl<SPI> AsyncBus for SC16IS752spiAsync<SPI>
+where
+    SPI: AsyncSpiDevice,
+{
+    type Error = SC16IS752Error<SPI::Error>;
+
+    async fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, Self::Error> {
+        let mut result = [0u8; 2];
+        self.spi
+            .transfer(
+                &mut result,
+                &[1 << 7 | (reg as u8) << 3 | (channel as u8) << 1, 0xaa],
+            )
+            .await
+            .map_err(SC16IS752Error::Bus)
+            .and(Ok(result[1]))
+    }
+
+    async fn write_register(
+        &mut self,
+        channel: Channel,
+        reg: Registers,
+        payload: u8,
+    ) -> Result<(), Self::Error> {
+        self.spi
+            .write(&[(reg as u8) << 3 | (channel as u8) << 1u8, payload])
+            .await
+            .map_err(SC16IS752Error::Bus)
+    }
+}
+
+pub struct SC16IS752Async<BUS>
+where
+    BUS: AsyncBus,
+{
+    bus: BUS,
+    xtal_freq: u32,
+    fifo: [u8; 2],
+    peek_flags: [bool; 2],
+    peek_buf: [Option<u8>; 2],
+}
+
+impl<BUS> SC16IS752Async<BUS>
+where
+    BUS: AsyncBus,
+{
+    pub fn new(bus: BUS, xtal_freq: u32) -> Self {
+        Self {
+            bus,
+            xtal_freq,
+            fifo: [0u8; 2],
+            peek_flags: [false; 2],
+            peek_buf: [None; 2],
+        }
+    }
+
+    /// Get an async channel wrapper that implements embedded-io-async traits
+    pub fn get_channel(&mut self, channel: Channel) -> AsyncChannelWrapper<'_, BUS> {
+        AsyncChannelWrapper::new(self, channel)
+    }
+
+    /// Async version of initialise_uart
+    pub async fn initialise_uart(
+        &mut self,
+        channel: Channel,
+        config: UartConfig,
+    ) -> Result<(), BUS::Error> {
+        self.set_baudrate(channel, config.baud).await?;
+        self.set_line(channel, config.word_length, config.parity, config.stop_bit)
+            .await?;
+        Ok(())
+    }
+
+    async fn read_register(&mut self, channel: Channel, reg: Registers) -> Result<u8, BUS::Error> {
+        self.bus.read_register(channel, reg).await
+    }
+
+    async fn write_register(
+        &mut self,
+        channel: Channel,
+        reg: Registers,
+        payload: u8,
+    ) -> Result<(), BUS::Error> {
+        self.bus.write_register(channel, reg, payload).await
+    }
+
+    async fn set_baudrate(&mut self, channel: Channel, baud: u32) -> Result<(), BUS::Error> {
+        let divisor = self.xtal_freq / baud / 16;
+        let lcr = self.read_register(channel, Registers::LCR).await?;
+        self.write_register(channel, Registers::LCR, lcr | 0x80)
+            .await?; // Enable divisor latch
+        self.write_register(channel, Registers::RhrThr, (divisor & 0xFF) as u8)
+            .await?; // DLL
+        self.write_register(channel, Registers::IER, (divisor >> 8) as u8)
+            .await?; // DLH
+        self.write_register(channel, Registers::LCR, lcr).await?; // Disable divisor latch
+        Ok(())
+    }
+
+    async fn set_line(
+        &mut self,
+        channel: Channel,
+        word_length: u8,
+        parity: Parity,
+        stop_bit: u8,
+    ) -> Result<(), BUS::Error> {
+        let mut lcr_val: u8 = 0x00;
+
+        match word_length {
+            5 => lcr_val |= 0x00,
+            6 => lcr_val |= 0x01,
+            7 => lcr_val |= 0x02,
+            8 => lcr_val |= 0x03,
+            _ => return Ok(()), // Invalid word length
+        }
+
+        if stop_bit == 2 {
+            lcr_val |= 0x04;
+        }
+
+        match parity {
+            Parity::NoParity => {}
+            Parity::Odd => lcr_val |= 0x08,
+            Parity::Even => lcr_val |= 0x18,
+            Parity::ForcedParity1 => lcr_val |= 0x28,
+            Parity::ForcedParity0 => lcr_val |= 0x38,
+        }
+
+        self.write_register(channel, Registers::LCR, lcr_val).await
+    }
+
+    pub async fn fifo_available_data(&mut self, channel: Channel) -> Result<u8, BUS::Error> {
+        self.read_register(channel, Registers::RXLVL).await
+    }
+
+    pub async fn fifo_available_space(&mut self, channel: Channel) -> Result<u8, BUS::Error> {
+        let fifo_size = 64u8;
+        let tx_level = self.read_register(channel, Registers::TXLVL).await?;
+        Ok(fifo_size - tx_level)
+    }
+
+    async fn write_byte(&mut self, channel: Channel, val: &u8) -> Result<(), BUS::Error> {
+        self.write_register(channel, Registers::RhrThr, *val).await
+    }
+
+    pub async fn write(&mut self, channel: Channel, payload: &[u8]) -> Result<usize, BUS::Error> {
+        let space_left = self.fifo_available_space(channel).await? as usize;
+        let len = payload.len().min(space_left);
+
+        for i in 0..len {
+            self.write_byte(channel, &payload[i]).await?;
+        }
+        Ok(len)
+    }
+
+    async fn read_byte(&mut self, channel: Channel) -> Result<Option<u8>, BUS::Error> {
+        if self.fifo_available_data(channel).await? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.read_register(channel, Registers::RhrThr).await?))
+    }
+
+    pub async fn read(&mut self, channel: Channel, buf: &mut [u8]) -> Result<usize, BUS::Error> {
+        let available = self.fifo_available_data(channel).await? as usize;
+        let len = buf.len().min(available);
+
+        for i in 0..len {
+            if let Ok(Some(byte)) = self.read_byte(channel).await {
+                buf[i] = byte;
+            }
+        }
+        Ok(len)
+    }
+
+    pub async fn flush(&mut self, channel: Channel) -> Result<(), BUS::Error> {
+        let mut tmp_line_status_register: u8 = 0;
+
+        while (tmp_line_status_register & 0x20) == 0 {
+            tmp_line_status_register = self.read_register(channel, Registers::LSR).await?;
+        }
+        Ok(())
+    }
+}
+
 impl<BUS> SC16IS752<BUS>
 where
     BUS: Bus,
@@ -341,6 +738,11 @@ where
             peek_flags: [false; 2],
             peek_buf: [None; 2],
         }
+    }
+
+    /// Get a channel wrapper that implements embedded-io traits
+    pub fn get_channel(&mut self, channel: Channel) -> ChannelWrapper<'_, BUS> {
+        ChannelWrapper::new(self, channel)
     }
 
     /// Initalises a single UART using UartConfig struct
