@@ -427,6 +427,53 @@ where
     }
 }
 
+/// Owned channel wrapper that implements embedded-io traits
+pub struct OwnedChannelWrapper<BUS>
+where
+    BUS: Bus,
+{
+    device: SC16IS752<BUS>,
+    channel: Channel,
+}
+
+impl<BUS> OwnedChannelWrapper<BUS>
+where
+    BUS: Bus,
+{
+    pub fn new(device: SC16IS752<BUS>, channel: Channel) -> Self {
+        Self { device, channel }
+    }
+}
+
+impl<BUS> ErrorType for OwnedChannelWrapper<BUS>
+where
+    BUS: Bus,
+{
+    type Error = BUS::Error;
+}
+
+impl<BUS> Write for OwnedChannelWrapper<BUS>
+where
+    BUS: Bus,
+{
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.device.write(self.channel, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.device.flush(self.channel)
+    }
+}
+
+impl<BUS> Read for OwnedChannelWrapper<BUS>
+where
+    BUS: Bus,
+{
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.device.read(self.channel, buf)
+    }
+}
+
 /// Async channel wrapper that implements embedded-io-async traits
 pub struct AsyncChannelWrapper<'a, BUS>
 where
@@ -466,6 +513,53 @@ where
 }
 
 impl<'a, BUS> AsyncRead for AsyncChannelWrapper<'a, BUS>
+where
+    BUS: AsyncBus,
+{
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.device.read(self.channel, buf).await
+    }
+}
+
+/// Owned async channel wrapper that implements embedded-io-async traits
+pub struct OwnedAsyncChannelWrapper<BUS>
+where
+    BUS: AsyncBus,
+{
+    device: SC16IS752Async<BUS>,
+    channel: Channel,
+}
+
+impl<BUS> OwnedAsyncChannelWrapper<BUS>
+where
+    BUS: AsyncBus,
+{
+    pub fn new(device: SC16IS752Async<BUS>, channel: Channel) -> Self {
+        Self { device, channel }
+    }
+}
+
+impl<BUS> embedded_io_async::ErrorType for OwnedAsyncChannelWrapper<BUS>
+where
+    BUS: AsyncBus,
+{
+    type Error = BUS::Error;
+}
+
+impl<BUS> AsyncWrite for OwnedAsyncChannelWrapper<BUS>
+where
+    BUS: AsyncBus,
+{
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.device.write(self.channel, buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.device.flush(self.channel).await
+    }
+}
+
+impl<BUS> AsyncRead for OwnedAsyncChannelWrapper<BUS>
 where
     BUS: AsyncBus,
 {
@@ -601,6 +695,11 @@ where
     /// Get an async channel wrapper that implements embedded-io-async traits
     pub fn get_channel(&mut self, channel: Channel) -> AsyncChannelWrapper<'_, BUS> {
         AsyncChannelWrapper::new(self, channel)
+    }
+
+    /// Convert the device into an owned async channel wrapper for the specified channel
+    pub fn into_channel(self, channel: Channel) -> OwnedAsyncChannelWrapper<BUS> {
+        OwnedAsyncChannelWrapper::new(self, channel)
     }
 
     /// Async version of initialise_uart
@@ -743,6 +842,11 @@ where
     /// Get a channel wrapper that implements embedded-io traits
     pub fn get_channel(&mut self, channel: Channel) -> ChannelWrapper<'_, BUS> {
         ChannelWrapper::new(self, channel)
+    }
+
+    /// Convert the device into an owned channel wrapper for the specified channel
+    pub fn into_channel(self, channel: Channel) -> OwnedChannelWrapper<BUS> {
+        OwnedChannelWrapper::new(self, channel)
     }
 
     /// Initalises a single UART using UartConfig struct
